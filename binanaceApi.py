@@ -9,7 +9,8 @@ import requests
 import logging
 import json
 import pprint
-from strategy import TechnicalStrategy, BreakoutStrategy
+from strategies import TechnicalStrategy
+import pandas as pd
 
 logger = logging.getLogger()
 
@@ -25,10 +26,37 @@ class BinanceFuturesClient:
         self._public_key = public_key
         self._secret_key = secret_key
         self._headers = {'X-MBX-APIKEY': self._public_key}
+
         self.contracts = self.get_contracts()
         self.balances = self.get_balances()
         self.prices = dict()
-        self.strategies: typing.Dict[int, typing.Union[TechnicalStrategy, BreakoutStrategy]] = dict()
+
+        self.strategies = dict()
+        exchanges = {"Binance": self}
+        contract = "ETHUSDT"
+        exchange = "Binance"
+        timeframe = "1m"
+        balance_pct = 20
+        take_profit = 1
+        stop_loss = 1
+        ema_fast = 12
+        ema_slow = 26
+        ema_signal = 9
+        rsi_length = 14
+
+        self.strategies = TechnicalStrategy(exchanges["Binance"], contract,
+                                            exchange, timeframe,
+                                            balance_pct,
+                                            take_profit,
+                                            stop_loss,
+                                            ema_fast,
+                                            ema_slow,
+                                            ema_signal,
+                                            rsi_length
+                                            )
+
+        self.strategies.candles = self.get_historical_candles(contract, timeframe)
+
         self.logs = []
 
         self._ws_id = 1
@@ -99,17 +127,13 @@ class BinanceFuturesClient:
         candels_array = []
         if raw_candles is not None:
             for c in raw_candles:
-                candels_array.append({'Open time': c[0],
+                candels_array.append({'Open_time': c[0],
                                       'Open': float(c[1]),
                                       'High': float(c[2]),
                                       'Low': float(c[3]),
                                       'Close': float(c[4]),
                                       'Volume': float(c[5]),
-                                      'Close time': float(c[6]),
-                                      'Quote asset volume': float(c[7]),
-                                      'Number of trades': float(c[8]),
-                                      'Taker buy base asset volume': float(c[9]),
-                                      'Taker buy quote asset volume': float(c[10]),
+                                      'Close_time': float(c[6]),
                                       })
         return candels_array
 
@@ -133,27 +157,62 @@ class BinanceFuturesClient:
         account_data = self._make_request("GET", "/api/v3/account", data)
         if account_data is not None:
             for a in account_data['balances']:
-                # balances[a['baseAsset']['asset']] = a['baseAsset']
+                # balances [a ['baseAsset'] ['asset']] = a ['baseAsset']
                 if float(a['free']) > 0.0:
                     balances[a['asset']] = (a['free'])
         return balances
 
-    def place_order(self, symbol, side: str,order_type: str, quantity: float,
-                    price,
-                    tif=None):
+    def place_order(self, contract, order_type: str,
+                    quantity: float, side: str,
+                    price=None, tif=None):
+        lotSize =self.contracts['ETHUSDT']['baseAssetPrecision']
+        print(float(round((quantity / lotSize) * lotSize,4)))
         data = dict()
-        data['symbol'] = symbol
-        data['side'] = side
-        data['type'] = order_type
-        data['quantity'] = quantity
+        data['symbol'] = contract
+        data['side'] = side.upper()
+        data['type'] = order_type.upper()
+        data['quantity'] = float(round((quantity / lotSize) * lotSize,4))
+
         if price is not None:
-            data['price'] = price
+            data['price'] = round(round(price / self.contracts['ETHUSDT']['stepSize']) *
+                                  self.contracts['ETHUSDT']['stepSize'], 8)
         if tif is not None:
             data['timeInForce'] = tif
         data['timestamp'] = int(time.time() * 1000)
         data['signature'] = self._generate_signature(data)
+
         order_status = self._make_request("POST", "/api/v3/order", data)
+        print(order_status)
+
+        if order_status is not None:
+            if order_status['status'] == "FILLED":
+                order_status['avgPrice'] = self._get_execution_price(contract, order_status['orderId'])
+            else:
+                order_status['avgPrice'] = 0
+
+            print(order_status,"avgPrice")
+            print(order_status["avgPrice"], "avgPrice")
         return order_status
+
+    def _get_execution_price(self, contract, order_id: int) -> float:
+        """
+        For Binance Spot only, find the equivalent of the 'avgPrice' key on
+        the futures side.
+        The average price is the weighted sum of each trade price
+        related to the order_id
+        """
+        data = dict()
+        data['timestamp'] = int(time.time() * 1000)
+        data['symbol'] = contract
+        data['signature'] = self._generate_signature(data)
+
+        trades = self._make_request("GET", "/api/v3/myTrades", data)
+        avg_price = 0
+        if trades is not None:
+            for t in trades:
+                if t['orderId'] == order_id:
+                    avg_price += (float(t['price']) * float(t['qty']))  # Weighted sum
+        return avg_price
 
     def cancel_order(self, symbol):
         data = dict()
@@ -174,7 +233,6 @@ class BinanceFuturesClient:
         if order_status is not None:
             order_status = order_status
         return order_status
-
 
     ########################
     ###### WEBSOCKETS ######
@@ -198,9 +256,10 @@ class BinanceFuturesClient:
     ##################
     def _on_open(self, ws):
         logger.info("Binance connection opened")
-        #self.subscribe_channel(list(self.contracts.values()), "bookTicker")
+        # self.subscribe_channel(list(self.contracts.values()), "bookTicker")
         self.subscribe_channel("ETHUSDT", "bookTicker")
         self.subscribe_channel("ETHUSDT", "aggTrade")
+        # self.subscribe_channel("ETHUSDT", "kline_1m")
 
     ##################
     ####   CLOSE  ####
@@ -218,15 +277,24 @@ class BinanceFuturesClient:
     ####   MESSG  ####
     ##################
     def _on_message(self, ws, msg: str):
-        data = json.loads(msg)
-        symbol = data['s']
-        if symbol not in self.prices:
-            self.prices[symbol] = {'bid': float(data['b']), 'ask': float(data['a'])}
-        else:
-            self.prices[symbol]['bid'] = float(data['b'])
-            self.prices[symbol]['ask'] = float(data['a'])
 
-        print(self.prices[symbol])
+        data = json.loads(msg)
+
+        if "e" not in data:
+            symbol = data['s']
+
+            if symbol not in self.prices:
+                self.prices[symbol] = {'bid': float(data['b']), 'ask': float(data['a'])}
+            else:
+                self.prices[symbol]['bid'] = float(data['b'])
+                self.prices[symbol]['ask'] = float(data['a'])
+
+        # PNL Calculation
+
+        else:
+            res = self.strategies.parse_trades(float(data['p']), float(data['q']), data['T'])  # Updates candlesticks
+            self.strategies.check_trade(res)
+            self.strategies._check_signal()
 
     ##################
     ####   CHAN1  ####
@@ -237,16 +305,34 @@ class BinanceFuturesClient:
         data['params'] = []
         data['params'].append(symbol.lower() + "@" + channel)
         data['id'] = self._ws_id
-        #for contract in contracts:
-            #data['params'].append(symbol.lower() + "@" + channel)
-        #data['id'] = self._ws_id
+        # for contract in contracts:
+        # data['params'].append(symbol.lower() + "@" + channel)
+        # data['id'] = self._ws_id
 
         try:
             self._ws.send(json.dumps(data))
-            print(data,type(data))
-            print(json.dumps(data),type(json.dumps(data)))
+        # print(data, type(data))
+        # print(json.dumps(data), type(json.dumps(data)))
         except Exception as e:
             print("Websocket error while subscribing to %s %s updates: %s", len(symbol), channel, e)
             logger.error("Websocket error while subscribing to %s %s updates: %s", len(symbol), channel, e)
 
         self._ws_id += 1
+
+    def get_trade_size(self, contract, price: float, balance_pct: float):
+        """
+        Compute the trade size for the strategy module
+        based on the percentage of the balance to use
+        that was defined in the strategy component.
+        """
+
+        balance = self.get_balances()
+        quote_asset ='ETHUSDT'
+
+        trade_size = (float(balance['ETH']) * balance_pct / 100)
+
+        print(trade_size)
+        logger.info("Binance current %s balance = %s, trade size = %s",
+                    quote_asset, float(balance['ETH']), trade_size)
+
+        return trade_size
