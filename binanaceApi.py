@@ -36,9 +36,9 @@ class BinanceFuturesClient:
         contract = "ETHUSDT"
         exchange = "Binance"
         timeframe = "1m"
-        balance_pct = 20
-        take_profit = 1
-        stop_loss = 1
+        balance_pct = 25
+        take_profit = 0.5
+        stop_loss = 0.5
         ema_fast = 12
         ema_slow = 26
         ema_signal = 9
@@ -211,7 +211,8 @@ class BinanceFuturesClient:
         if trades is not None:
             for t in trades:
                 if t['orderId'] == order_id:
-                    avg_price += (float(t['price']) * float(t['qty']))  # Weighted sum
+                    #avg_price += (float(t['price']) * float(t['qty']))
+                    avg_price += (float(t['price']))
         return avg_price
 
     def cancel_order(self, symbol):

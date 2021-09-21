@@ -51,6 +51,7 @@ class Strategy:
             # Check Take profit / Stop loss
             for trade in self.trades:
                 print(self.trades)
+                print("same_candle")
                 if trade['status'] == "open" and trade['entry_price'] is not None:
                     self._check_tp_sl(trade)
 
@@ -163,6 +164,7 @@ class Strategy:
 
             new_trade = { "time": int(time.time() * 1000),
                           "entry_price": avg_fill_price,
+                          "candle_price": avg_fill_price,
                           "contract": self.contract,
                           "strategy": "RSI+MACD",
                           "side": position_side,
@@ -180,6 +182,9 @@ class Strategy:
 
         price = self.candles[-1]['Close']
         print(price,'PRICE FOR LAST CANDELE')
+        print(trade['entry_price'] * (1 + self.stop_loss / 100))
+        print(trade['entry_price'] * (1 - self.take_profit / 100))
+
         if trade['side'] == "long":
             if self.stop_loss is not None:
                 if price <= trade['entry_price'] * (1 - self.stop_loss / 100):
@@ -190,9 +195,11 @@ class Strategy:
 
         elif trade['side'] == "short":
             if self.stop_loss is not None:
+                #3355 >= 3388
                 if price >= trade['entry_price'] * (1 + self.stop_loss / 100):
                     sl_triggered = True
             if self.take_profit is not None:
+                # 3355 <= 3321
                 if price <= trade['entry_price'] * (1 - self.take_profit / 100):
                     tp_triggered = True
 
@@ -277,9 +284,10 @@ class TechnicalStrategy(Strategy):
        # print("---------------------------")
         # if rsi < 30 and macd_line > macd_signal:
         # elif rsi > 70 and macd_line < macd_signal:
+        #check the stop loss
         if rsi < 30:
             return 1
-        elif rsi > 40:
+        elif rsi > 70:
             return -1
         else:
             return 0
